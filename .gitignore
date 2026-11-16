@@ -1,0 +1,10 @@
+__pycache__/
+data/review_state.sqlite3*
+!screenshots/*.png
+!docs/screens/*.png
+
+.env
+.env.*
+!.env.example
+.venv/
+.DS_Store
