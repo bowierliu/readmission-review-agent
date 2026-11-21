@@ -476,3 +476,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 tr[data-stronger-signal] { color: var(--ink); background: var(--blue-tint); }
 .signal-marker { display: block; margin-top: 4px; color: var(--blue); font-weight: 650; }
 #evidence-signal_check table { min-width: 900px; }
+
+
+.mode-help {
+  color: var(--muted, #57534e);
+  font-size: .9rem;
+  max-width: 46rem;
+}
+.mode-help p { margin: .5rem 0; }
+.mode-help summary { cursor: pointer; color: #234daf; font-weight: 600; }
+.mode-help details { margin-top: .6rem; }
+.mode-help details p { line-height: 1.55; }

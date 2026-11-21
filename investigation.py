@@ -1,12 +1,14 @@
 """Read-only SQL evidence and the bounded investigation flow."""
 
 import sqlite3
+import time
 from calendar import monthrange
 from contextlib import closing, contextmanager
 from datetime import date, timedelta
 from functools import cached_property
 from pathlib import Path
 
+from portfolio_guard import GuardError
 from signal_stats import fisher_exact_two_sided, newcombe_diff_interval, wilson_interval
 
 ROOT = Path(__file__).resolve().parent
@@ -103,15 +105,21 @@ def signal_row(scope):
 
 
 class CaseData:
-    def __init__(self, case_id, path=FIXTURES):
+    def __init__(self, case_id, path=FIXTURES, *, deadline=None):
         if case_id not in FIXTURE_CASE_IDS:
             raise ValueError("Unknown case.")
         self.case_id = case_id
         self.path = path
+        self.deadline = deadline
         self._snapshot = None
 
     def connect(self):
-        conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+        # Live investigations fail immediately on locks; SQLite checks its clock
+        # throughout long reads rather than waiting for the query to return.
+        conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True,
+                               timeout=0 if self.deadline is not None else 5)
+        if self.deadline is not None:
+            conn.set_progress_handler(lambda: time.monotonic() >= self.deadline, 100)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -128,10 +136,15 @@ class CaseData:
 
     def query(self, sql, **params):
         bindings = {"scenario_id": self.case_id, **params}
-        if self._snapshot is not None:
-            return [dict(row) for row in self._snapshot.execute(sql, bindings)]
-        with closing(self.connect()) as conn:
-            return [dict(row) for row in conn.execute(sql, bindings)]
+        try:
+            if self._snapshot is not None:
+                return [dict(row) for row in self._snapshot.execute(sql, bindings)]
+            with closing(self.connect()) as conn:
+                return [dict(row) for row in conn.execute(sql, bindings)]
+        except sqlite3.OperationalError:
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                raise ToolSelectionError("The live SQL check reached the investigation time limit.") from None
+            raise
 
     @cached_property
     def metric_sql(self):
@@ -442,14 +455,18 @@ def verdict_for(status, card, signal, drilldowns, required):
     return {"title": title, "support": support, "next_action": action, "reason": reason}
 
 
-def investigate(data, choose=None):
+def investigate(data, choose=None, *, dispatch=None):
     with data.snapshot():
-        yield from investigation_events(data, choose)
+        yield from investigation_events(data, choose, dispatch)
 
 
-def investigation_events(data, choose):
-    def as_event(check):
-        return {"type": "step", "step": data.evidence(check)}
+def investigation_events(data, choose, dispatch):
+    def run_check(name):
+        # Meter each complete diagnostic, including SQL provenance and drilldowns.
+        def execute():
+            check = getattr(data, name)()
+            return check, {"type": "step", "step": data.evidence(check)}
+        return dispatch(execute) if dispatch else execute()
 
     drilldowns = []
 
@@ -462,8 +479,8 @@ def investigation_events(data, choose):
     def skipped(label):
         return {"label": label, "scopes": [], "strongest_scope": None}
 
-    coverage = data.coverage()
-    yield as_event(coverage)
+    coverage, event = run_check("coverage")
+    yield event
     _, observed, required, complete = data.follow_up
     if not complete:
         result = build_result(
@@ -477,8 +494,8 @@ def investigation_events(data, choose):
         yield as_completion(result, skipped("Not computed: follow-up incomplete"))
         return
 
-    headline = data.headline()
-    yield as_event(headline)
+    headline, event = run_check("headline")
+    yield event
     checks = [coverage, headline]
     remaining = {key: description for key, description in TOOL_DESCRIPTIONS.items()
                  if key != "signal_check"}
@@ -488,18 +505,18 @@ def investigation_events(data, choose):
     while remaining:
         try:
             selection = choose(remaining.copy(), tuple(checks)) if choose else next(iter(remaining))
-            if selection is not None and selection not in remaining:
+            if selection is None:
+                break
+            if selection not in remaining:
                 raise ToolSelectionError("The model returned an unavailable check.")
-        except ToolSelectionError as error:
+            del remaining[selection]
+            check, event = run_check(selection)
+        except (ToolSelectionError, GuardError) as error:
             if not failed_reconciliation:
                 raise
             # A later model error cannot erase a hold already established by SQL.
             notice = str(error)
             break
-        if selection is None:
-            break
-        del remaining[selection]
-        check = getattr(data, selection)()
         checks.append(check)
         if selection == "reconcile_sources":
             failed_reconciliation = has_gaps(check)
@@ -510,7 +527,6 @@ def investigation_events(data, choose):
                 remaining["signal_check"] = TOOL_DESCRIPTIONS["signal_check"]
         elif selection == "signal_check":
             signal = check["statistics"]
-        event = as_event(check)
         if selection == "reconcile_sources":
             drilldowns = event["step"]["drilldowns"]
         yield event

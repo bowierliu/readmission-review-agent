@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-service="pages">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,8 +7,9 @@
   <meta name="description" content="Investigate changes in synthetic 30-day heart failure readmission data.">
   <title>Readmission Review Agent</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="./assets/app.css">
+  <script src="./assets/recordings.js" defer></script>
+  <script src="./assets/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to case</a>
@@ -113,6 +114,14 @@
             <button type="button" id="run-fresh" class="button button-secondary" hidden>Run fresh</button>
           </div>
         </div>
+        <div class="mode-help">
+          <p id="mode-info"></p>
+          <details>
+            <summary>Run the live model locally</summary>
+            <p>Download the project and open <strong>Launch Readmission.command</strong> on a Mac with Python 3.10+. After the one-time spending controls and key setup, choose <strong>Live agent</strong> and run Case A or B. OpenAI receives aggregate synthetic evidence. An analyst reviews the draft and decides on any handoff.</p>
+            <a href="https://github.com/bowierliu/readmission-review-agent#local-live-agent">Local setup and spending controls</a>
+          </details>
+        </div>
         <p id="run-error" class="inline-error" role="alert" hidden></p>
 
         <section id="evidence-panel" class="panel output-panel" aria-labelledby="evidence-tab" hidden>
@@ -139,7 +148,7 @@
         <div id="compare-output"></div>
       </section>
 
-      <footer class="workspace-footer">Interview demo <span aria-hidden="true">·</span> Synthetic data</footer>
+      <footer class="workspace-footer">Synthetic data <span aria-hidden="true">·</span> Analyst review required</footer>
     </div>
     <noscript>This workspace requires JavaScript to run investigations.</noscript>
   </main>

@@ -5,8 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app import REPLAYS
+from app import REPLAYS, STATIC, add_provenance, load_replay
 from investigation import CASE_IDS, CaseData, investigate, record_with_local_policy
+
+
+def browser_asset(traces):
+    recordings = {key: [add_provenance(event, "replay", traces["captured_at"]) for event in events]
+                  for key, events in traces["cases"].items()}
+    return "window.readmissionRecordings = " + json.dumps(recordings, separators=(",", ":")) + ";\n"
 
 
 def main():
@@ -22,7 +28,8 @@ def main():
         path = Path(directory) / REPLAYS.name
         path.write_text(json.dumps(traces, indent=2) + "\n")
         path.replace(REPLAYS)
-    print(f"Wrote {REPLAYS}")
+    (STATIC / "assets" / "recordings.js").write_text(browser_asset(load_replay()))
+    print(f"Wrote {REPLAYS} and browser recordings")
 
 
 if __name__ == "__main__":

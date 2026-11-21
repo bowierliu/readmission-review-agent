@@ -3,20 +3,22 @@
 import argparse
 import json
 import mimetypes
-import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+from threading import Thread
 from uuid import uuid4
 
 from investigation import CASE_IDS, FIXTURES, ROOT, CaseData, ToolSelectionError, investigate
-from live import DEFAULT_MODEL, make_chooser
+from live import make_chooser
+from portfolio_guard import Guard, GuardError
 
 REPLAYS = ROOT / "data" / "replays.json"
-STATIC = ROOT / "static"
+STATIC = ROOT / "docs"
+PUBLIC_ASSETS = {"app.css", "app.js", "recordings.js"}
 
 
 def load_replay():
@@ -75,6 +77,27 @@ class ReviewStore:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        # The default HTTP server logs URLs, which may contain user-supplied data.
+        pass
+
+    def valid_host(self):
+        port = self.server.server_port
+        hosts = {f"localhost:{port}", f"127.0.0.1:{port}"}
+        supplied = self.headers.get_all("Host", [])
+        return len(supplied) == 1 and supplied[0] in hosts
+
+    def local_request(self, *, check_origin=False):
+        self.server.last_request = time.monotonic()
+        if not self.valid_host():
+            self.reply_json(403, {"message": "Open the local loopback URL."})
+            return False
+        origins = self.headers.get_all("Origin", [])
+        if check_origin and origins and origins != ["http://" + self.headers["Host"]]:
+            self.reply_json(403, {"message": "The local page must start this request."})
+            return False
+        return True
+
     def fixture_path(self):
         return getattr(self.server, "fixture_path", FIXTURES)
 
@@ -91,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(status, json.dumps(value).encode(), "application/json")
 
     def do_GET(self):
+        if not self.local_request():
+            return
         path = urlsplit(self.path).path
         if path == "/api/cases":
             try:
@@ -98,20 +123,28 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, sqlite3.Error, ValueError):
                 self.reply_json(500, {"message": "Could not load the synthetic fixture data."})
                 return
-            self.reply_json(200, {"cases": cards, "live_available": self.server.choose is not None})
+            self.reply_json(200, {"app": "readmission-review-agent", "cases": cards,
+                                  "live_available": self.server.live_session is not None})
             return
 
-        # Resolve files inside the public folder only. The database, source, and env stay private.
-        name = "index.html" if path == "/" else path.removeprefix("/static/")
-        target = (STATIC / name).resolve()
-        if (target.is_relative_to(STATIC) and target.is_file() and not name.startswith(".")
-                and target.suffix.lower() not in {".py", ".sql", ".sqlite3"}):
-            content_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
-            self.reply(200, target.read_bytes(), content_type)
+        if path in ("/", "/index.html", "/static/index.html"):
+            page = (STATIC / "index.html").read_bytes()
+            page = page.replace(b'data-service="pages"', b'data-service="local"')
+            page = page.replace(b'./assets/', b'/assets/')
+            self.reply(200, page, "text/html; charset=utf-8")
+            return
+        # Keep the original /static asset paths compatible with local bookmarks.
+        prefix = next((prefix for prefix in ("/assets/", "/static/") if path.startswith(prefix)), None)
+        name = path[len(prefix):] if prefix else None
+        if name in PUBLIC_ASSETS:
+            target = STATIC / "assets" / name
+            self.reply(200, target.read_bytes(), mimetypes.guess_type(name)[0])
         else:
             self.reply_json(404, {"message": "Page not found."})
 
     def do_POST(self):
+        if not self.local_request(check_origin=True):
+            return
         path = urlsplit(self.path).path
         if path not in {"/api/investigate", "/api/review"}:
             self.reply_json(404, {"message": "Page not found."})
@@ -141,8 +174,8 @@ class Handler(BaseHTTPRequestHandler):
                 or case_id not in CASE_IDS or mode not in ("checklist", "replay", "live")):
             self.reply_json(400, {"message": "Choose a valid case and investigation mode."})
             return
-        if mode == "live" and self.server.choose is None:
-            self.reply_json(409, {"message": "Live mode requires a server-side API key. Use Checklist (fresh) or Saved trace."})
+        if mode == "live" and self.server.live_session is None:
+            self.reply_json(409, {"message": "Enable the local spending controls and configure the provider key to use Live agent."})
             return
         self.stream_investigation(case_id, mode)
 
@@ -159,22 +192,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             try:
-                if mode == "replay":
-                    replay = load_replay()
-                    ran_at = replay["captured_at"]
-                    events = replay["cases"][case_id]
-                else:
-                    ran_at = datetime.now(timezone.utc).isoformat()
-                    choose = self.server.choose if mode == "live" else None
-                    events = investigate(CaseData(case_id, self.fixture_path()), choose)
-                for raw_event in events:
-                    event = add_provenance(raw_event, mode, ran_at)
-                    if event["type"] == "complete":
-                        event["result"]["run_id"] = self.server.reviews.completed()
-                    send_event(event)
-                    if mode == "replay" and event["type"] == "step":
-                        time.sleep(0.4)
-            except ToolSelectionError as error:
+                session = self.server.live_session() if mode == "live" else nullcontext()
+                complete = None
+                with session as run:
+                    if mode == "replay":
+                        replay = load_replay()
+                        ran_at = replay["captured_at"]
+                        events = replay["cases"][case_id]
+                    else:
+                        ran_at = datetime.now(timezone.utc).isoformat()
+                        data = CaseData(case_id, self.fixture_path(), deadline=run.deadline if run else None)
+                        events = (investigate(data, make_chooser(run), dispatch=run.tool)
+                                  if mode == "live" else investigate(data))
+                    for raw_event in events:
+                        event = add_provenance(raw_event, mode, ran_at)
+                        if event["type"] == "complete":
+                            complete = event
+                            continue
+                        if run:
+                            self.connection.settimeout(run.remaining())
+                        send_event(event)
+                        if mode == "replay" and event["type"] == "step":
+                            time.sleep(0.4)
+                if complete:
+                    complete["result"]["run_id"] = self.server.reviews.completed()
+                    send_event(complete)
+            except (ToolSelectionError, GuardError) as error:
                 send_event({"type": "error", "message": str(error)})
             except (OSError, sqlite3.Error, ValueError, KeyError):
                 send_event({"type": "error", "message": "Could not finish the investigation. Retry the run."})
@@ -185,14 +228,21 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--idle-minutes", type=int, default=0,
+                        help="Automatically stop the local server after this many inactive minutes.")
     args = parser.parse_args()
     if not FIXTURES.is_file() or not REPLAYS.is_file():
         parser.error("Missing fixtures or replay traces. See README.md for rebuild commands.")
 
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    model = os.environ.get("OPENAI_MODEL", DEFAULT_MODEL)
     with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
-        server.choose = make_chooser(api_key, model) if api_key else None
+        server.live_session = lambda: Guard.from_env().investigation("local-owner")
+        server.last_request = time.monotonic()
+        if args.idle_minutes > 0:
+            def stop_when_idle():
+                while time.monotonic() - server.last_request < 60 * args.idle_minutes:
+                    time.sleep(5)
+                server.shutdown()
+            Thread(target=stop_when_idle, daemon=True).start()
         server.reviews = ReviewStore(ROOT / "data" / "review_state.sqlite3")
         print(f"Readmission Review Agent · http://127.0.0.1:{server.server_port}", flush=True)
         try:

@@ -2,17 +2,28 @@
 
 An independent portfolio project for investigating 30-day heart failure readmission signals. All data is synthetic, including the two fictional hospitals, encounters, counts, and refresh notes. Rates are observed and unadjusted.
 
-## Launch locally
+## Try the demo
 
-From this project folder, use Python 3.10 or later and a browser. The app uses Python’s standard library and SQLite. The generated database and saved traces are included.
+[Open the interactive replay](https://bowierliu.github.io/readmission-review-agent/). Select **Play saved trace**, then **Inspect 75 unmatched stays**. Compare Cases A and B to see how two dashboards reach 16% with different implications for the analyst. You can also download the repository, extract it, and open `docs/index.html` directly. Both replay paths use bundled recordings and require no account, API key, installation, or backend.
 
-```bash
-python3 app.py
-```
+| Mode | Where | What you see |
+| --- | --- | --- |
+| Saved trace | Public page, downloaded HTML or local app | The original SQL evidence, timestamp and review draft from a deterministic local policy. Browser-only review marks last for the current tab session. |
+| Checklist (fresh) | Local app, offline | Python runs the fixed sequence against the bundled SQLite fixture. The analyst can inspect the SQL, statistics and unmatched synthetic stays. |
+| Live agent | Local app with an enabled budget and provider key | A real model chooses successive checks from aggregate evidence. Python validates each choice and owns the follow-up gate, statistics and draft. |
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The page opens on **Case A** with **Checklist (fresh)** selected. Use `python3 app.py --port 8766` if port 8765 is in use.
+## Local live agent
 
-## Demo script
+1. Download and extract the [project ZIP](https://github.com/bowierliu/readmission-review-agent/archive/refs/heads/main.zip), or clone this repository. Install Python 3.10 or later. All runtime dependencies are in the Python standard library.
+2. For live investigations, configure the shared spending ledger once and store your OpenAI key in macOS Keychain. Use service **Healthcare Portfolio** and account **openai**. Other operating systems can supply `PORTFOLIO_OPENAI_KEY` to the server from a private environment. Enable the ledger when ready. [Key setup, spending limits and disable switch](docs/LIVE_BUDGET.md)
+3. On macOS, double-click **Launch Readmission.command**. On other platforms, run `python3 launcher.py` (or `py launcher.py` on Windows). The launcher opens your browser, reuses a running instance, and starts a background loopback server that stops after 45 minutes of inactivity. You can close the launcher window. If the default port is occupied, run `python3 launcher.py --port 8766`.
+4. Select **Case A** or **Case B**, choose **Live agent**, and select **Run investigation**. Case C stops at the follow-up gate before any model call. Only aggregate synthetic evidence goes to OpenAI. The browser never asks for a key. **Mark reviewed** records the analyst's acknowledgment locally. Any handoff to a real team belongs to the analyst.
+
+To run a local checklist, skip the key and ledger setup, launch the app, and leave **Checklist (fresh)** selected. For foreground debugging run `python3 app.py` and open [the local workspace](http://127.0.0.1:8765).
+
+The public demo serves static files. A recruiter who wants to exercise the actual model can use their own key in their local credential store. A hosted owner-funded model would also need an authenticated application server and one durable, shared ledger. The current service accepts only loopback requests and uses one trusted local identity across the portfolio. The model flow is tested with simulated provider responses.
+
+## Local checklist walkthrough
 
 | Time | On screen | Talk track |
 | --- | --- | --- |
@@ -37,21 +48,6 @@ A cohort is reviewable when both hospital feeds are observed through month-end p
 - **The live model** sees aggregate synthetic evidence and selects an available read-only check or stops. Signal check becomes available after reconciliation passes.
 - **The analyst** inspects the evidence, verifies the next action and records **Mark reviewed** in the local review store at `data/review_state.sqlite3`. The analyst owns any handoff to a team.
 
-## Investigation modes
-
-**Checklist (fresh)** runs the fixed sequence against the current SQLite fixture. **Run fresh** starts a new run. Each evidence table shows its query source and timestamp. **Compare A and B** runs two fresh checklists and opens either full result.
-
-**Saved trace** streams a prior investigation using its original counts and recording timestamp. The included recordings used an evidence-based local policy. Both local modes work without an API key or network.
-
-**Live agent** has only been tested with simulated responses. To enable it, set `OPENAI_API_KEY` in the server process environment and restart the app. The default model is `gpt-4.1-mini`. Set `OPENAI_MODEL` before launch to configure a model that supports Chat Completions function calls. The provider receives aggregate synthetic evidence.
-
-```bash
-read -rsp 'OpenAI API key: ' OPENAI_API_KEY
-export OPENAI_API_KEY
-printf '\n'
-python3 app.py
-```
-
 ## Pilot against a fixed checklist
 
 Give the agent and a fixed ordered checklist the same metric, tools, and follow-up gate. Use a blinded set of analyst-adjudicated cases that includes true increases, missing batches, immature cohorts, and cases with several plausible explanations. Have reviewers judge whether each draft routes to the correct owner, cites the supporting counts, and preserves open questions. Track missed holds, unnecessary checks, time to a reviewable draft, and analyst corrections. Review disagreements to see whether adaptive tool ordering saves work and whether any errors justify keeping a check mandatory.
@@ -63,6 +59,10 @@ python3 data/build_fixtures.py
 python3 record_replays.py
 python3 -m unittest discover -s tests -v
 ```
+
+The browser recordings derive from the archived synthetic traces used by the local replay. Maintainers can run `scripts/publish-pages.sh` after publishing an audited main commit. It copies the four allowlisted HTML, CSS, JavaScript and recording files plus `.nojekyll` to the root of `gh-pages`. Select that branch and root directory in GitHub Pages settings.
+
+Each live SQL diagnostic counts toward the tool limit. SQLite checks the live deadline during long reads and immediately returns an error on a locked fixture. A withheld February cohort stops before any model request.
 
 The scenario answer key lives with the [fixture expectations](tests/fixture_expectations.md). It is separate from the live model inputs.
 

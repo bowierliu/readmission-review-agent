@@ -1,5 +1,7 @@
 "use strict";
 
+const localService = document.documentElement.dataset.service === "local";
+const defaultMode = localService ? "checklist" : "replay";
 const byId = (id) => document.getElementById(id);
 const runButton = byId("run-investigation");
 const freshButton = byId("run-fresh");
@@ -20,7 +22,8 @@ const iconPaths = {
 };
 let cases = [];
 let currentCase;
-let mode = "checklist";
+let mode = defaultMode;
+let liveAvailable = false;
 let comparisonVersion = 0;
 let shownEvidenceRun;
 
@@ -336,8 +339,8 @@ function paintNextAction(run) {
   if (!complete) return;
   byId("next-action-text").textContent = run.result.verdict.next_action;
   const reviewed = run.result.reviewed;
-  reviewButton.textContent = reviewed ? "Reviewed locally"
-    : run.savingReview ? "Saving review…" : "Mark reviewed";
+  reviewButton.textContent = reviewed ? (localService ? "Reviewed locally" : "Reviewed in this tab")
+    : run.savingReview ? "Saving review…" : localService ? "Mark reviewed" : "Mark reviewed in this tab";
   reviewButton.setAttribute("aria-disabled", String(reviewed || Boolean(run.savingReview)));
   reviewButton.toggleAttribute("data-reviewed", reviewed);
   const message = byId("review-error");
@@ -370,9 +373,15 @@ function paint() {
   compareButton.setAttribute("aria-pressed", String(comparing));
   runButton.setAttribute("aria-disabled", String(running));
   modeSelect.disabled = running;
-  freshButton.hidden = !complete || mode === "checklist";
+  byId("mode-info").textContent = {
+    replay: "Replay recorded synthetic SQL evidence. The original recording used a local rule to select checks.",
+    checklist: "Run a fixed sequence of checks against the local synthetic database.",
+    live: "OpenAI selects the next read-only check from aggregate evidence. The analyst owns the handoff.",
+  }[mode] + (localService && !liveAvailable ? " Live mode is disabled until the owner enables the spending controls." : "");
+  freshButton.hidden = !localService || !complete || mode === "checklist";
   runIcon.replaceChildren(running ? element("span", "spinner") : playIcon);
   byId("run-label").textContent = running ? "Running…" : error ? "Retry investigation"
+    : mode === "replay" ? (complete ? "Replay again" : "Play saved trace")
     : complete ? (mode === "checklist" ? "Run fresh" : "Run again") : "Run investigation";
   const message = byId("run-error");
   message.hidden = !error;
@@ -434,8 +443,22 @@ async function readInvestigation(response, run, onStep) {
 }
 
 async function fetchRun(caseId, mode, run, onStep) {
-  const response = await post("/api/investigate", { case_id: caseId, mode });
-  await readInvestigation(response, run, onStep);
+  if (localService) {
+    const response = await post("/api/investigate", { case_id: caseId, mode });
+    await readInvestigation(response, run, onStep);
+  } else {
+    if (mode !== "replay") throw new Error("Select Saved trace on the public demo.");
+    const events = JSON.parse(JSON.stringify(window.readmissionRecordings[caseId]));
+    for (const event of events) {
+      if (event.type === "complete") {
+        run.result = event.result;
+      } else {
+        run.steps.push(event.step);
+        onStep?.(event.step);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
   run.phase = "complete";
   return run;
 }
@@ -472,9 +495,12 @@ async function markReviewed() {
   run.reviewError = "";
   paintNextAction(run);
   try {
-    const response = await post("/api/review", { run_id: run.result.run_id });
-    const review = await response.json();
-    run.result.reviewed = review.reviewed;
+    if (localService) {
+      const response = await post("/api/review", { run_id: run.result.run_id });
+      run.result.reviewed = (await response.json()).reviewed;
+    } else {
+      run.result.reviewed = true;
+    }
   } catch (error) {
     run.reviewError = "Could not save the review. " + error.message;
   } finally {
@@ -482,7 +508,7 @@ async function markReviewed() {
   }
   if (activeKey() === key && runs.get(key) === run && byId("compare-view").hidden) {
     paintNextAction(run);
-    if (run.result.reviewed) announce("Reviewed locally.");
+    if (run.result.reviewed) announce(localService ? "Reviewed locally." : "Reviewed in this tab.");
   }
 }
 
@@ -491,7 +517,7 @@ function showCaseView(caseId, run) {
   byId("compare-view").hidden = true;
   byId("case-view").hidden = false;
   if (run) {
-    mode = modeSelect.value = "checklist";
+    mode = modeSelect.value = run.result.mode;
     runs.set(activeKey(), run);
   }
   paint();
@@ -522,13 +548,13 @@ async function loadComparison() {
   const output = byId("compare-output");
   byId("case-view").hidden = true;
   view.hidden = false;
-  output.replaceChildren(element("p", "panel-description", "Running both checklists…"));
+  output.replaceChildren(element("p", "panel-description", localService ? "Running both checklists…" : "Loading both recordings…"));
   paint();
   byId("compare-title").focus();
-  announce("Running fresh checklists for Cases A and B.");
+  announce(localService ? "Running fresh checklists for Cases A and B." : "Replaying Cases A and B.");
   try {
     const results = await Promise.all(["a", "b"].map((id) =>
-      fetchRun(id, "checklist", { phase: "running", steps: [] })));
+      fetchRun(id, defaultMode, { phase: "running", steps: [] })));
     if (view.hidden || version !== comparisonVersion) return;
     const grid = element("div", "comparison-grid");
     grid.append(...results.map(comparisonCard));
@@ -556,10 +582,18 @@ async function loadCases() {
   byId("load-message").textContent = "Loading cases…";
   byId("retry-cases").hidden = true;
   try {
-    const response = await fetch("/api/cases", { signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error("Cases could not be loaded.");
-    const payload = await response.json();
-    cases = payload.cases;
+    if (localService) {
+      const response = await fetch("/api/cases", { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw new Error("Cases could not be loaded.");
+      const payload = await response.json();
+      cases = payload.cases;
+      liveAvailable = payload.live_available;
+    } else {
+      cases = Object.values(window.readmissionRecordings).map((events) =>
+        events.find((event) => event.type === "complete").result.card);
+      modeSelect.querySelector('[value="checklist"]').disabled = true;
+    }
+    modeSelect.value = defaultMode;
     if (!cases?.length) throw new Error("No cases were returned.");
     currentCase = cases[0];
     caseSelector.replaceChildren(...cases.map((item) => {
@@ -571,12 +605,12 @@ async function loadCases() {
       });
       return button;
     }));
-    modeSelect.querySelector('[value="live"]').disabled = !payload.live_available;
+    modeSelect.querySelector('[value="live"]').disabled = !liveAvailable;
     paint();
     byId("case-load").hidden = true;
     byId("case-content").hidden = false;
   } catch (error) {
-    byId("load-message").textContent = "Cases could not be loaded. Check that the local server is running and try again.";
+    byId("load-message").textContent = localService ? "Cases could not be loaded. Check that the local server is running and try again." : "Could not open the bundled recordings. Reopen the demo with its assets folder.";
     byId("retry-cases").hidden = false;
   }
 }
