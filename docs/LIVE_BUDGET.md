@@ -48,3 +48,7 @@ These ceilings apply to generation requests made through these launchers at the 
 ## Publish the static demo
 
 From a reviewed checkout that matches the published main commit, run `sh scripts/publish-pages.sh`. This pushes only the browser assets named in the script to the `gh-pages` branch and preserves prior releases. Once per public repository, select **Settings → Pages → Deploy from a branch → gh-pages → / (root)**. Subsequent releases use the same script. The build requires no API key, database or backend.
+
+## Reproduce the budget verification
+
+Run `python3 scripts/verify_budget.py` from this checkout. It exercises 128 short sequences against the production ledger and kills a subprocess during a mocked call. Run `python3 -m unittest discover -s tests -p test_portfolio_guard.py` for concurrent callers, policy limits and the disable switch. Both commands use disposable local ledgers and make zero provider requests over the network.
