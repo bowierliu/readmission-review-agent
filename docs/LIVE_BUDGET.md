@@ -5,7 +5,7 @@ The public demo runs the included synthetic replay without credentials or infere
 ## One-time setup
 
 1. Download the repository and follow its README to launch the local app. On macOS, put a generic application password in the login keychain using **Keychain Access → File → New Password Item**. Use item name **Healthcare Portfolio**, account **openai**, and your OpenAI project API key as the password. Use a dedicated standard global OpenAI project with the pinned model available. The key must permit the Responses and input-token-count endpoints. On other systems, provision **PORTFOLIO_OPENAI_KEY** in the local server's environment using your credential manager. The application reads the value at request time. Avoid putting keys into a command line or a repository file.
-2. From any one of the three checkouts, run the commands below once for this OS account. All three launchers use the same ledger. New ledgers start disabled. Enabling can incur charges when someone clicks the local live action.
+2. From any one of the three checkouts, run the commands below once for this OS account with Python 3.10 or later. All three launchers use the same ledger. New ledgers start disabled. Enabling can incur charges when someone clicks the local live action.
 
    ```sh
    python3 portfolio_guard.py init
@@ -15,6 +15,16 @@ The public demo runs the included synthetic replay without credentials or infere
 
 3. Use the README's launcher and select the **live** option in the local app. Only the local server submits the preset question, synthetic evidence and instructions to the fixed HTTPS host api.openai.com. The key is passed to that host in its authorization header. The client requests no response storage. OpenAI's own account and abuse-monitoring policies apply. The local ledger stores neither prompts nor responses. The apps never send a key to GitHub Pages.
 4. To stop new model work across all three launchers, run `python3 portfolio_guard.py disable`. Already dispatched requests may complete and remain accounted. The public replay works independently.
+
+### Save the key with a hidden macOS prompt
+
+Open Terminal once and run the command below exactly as written. macOS prompts privately because `-w` is the final option. It stores a generic password in the default keychain. An existing matching item is preserved. All three launchers then read the same item each time you use live mode.
+
+```sh
+/usr/bin/security add-generic-password -s 'Healthcare Portfolio' -a openai -w
+```
+
+To check the name and account without displaying the key, run `/usr/bin/security find-generic-password -s 'Healthcare Portfolio' -a openai >/dev/null`. A successful lookup exits silently.
 
 ## Limits shared by the three local launchers
 
