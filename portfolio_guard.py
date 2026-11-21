@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
 MODEL = "gpt-5.4-mini-2026-03-17"
+AUTH_REJECTED = 41
 # Standard global text endpoint, USD billionths per token (full uncached price).
 INPUT_RATE, OUTPUT_RATE = 750, 4500
 DEFAULTS = {
@@ -142,6 +143,8 @@ def _worker() -> None:
                 {"Authorization": "Bearer " + key, "Content-Type": "application/json"},
             )
             response = conn.getresponse()
+            if response.status == 401:
+                raise SystemExit(AUTH_REJECTED)
             if response.status != 200:
                 raise ValueError
             raw = response.read(256_001)
@@ -168,7 +171,12 @@ def _request(
         if not isinstance(parsed, dict):
             raise ValueError
         return parsed
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if isinstance(exc, subprocess.CalledProcessError) and exc.returncode == AUTH_REJECTED:
+            raise GuardError(
+                "OpenAI rejected the portfolio key. Update the Healthcare Portfolio "
+                "Keychain item or PORTFOLIO_OPENAI_KEY in the local server environment."
+            ) from None
         raise GuardError(
             "The provider did not return a usable response. Try the offline demo."
         ) from None

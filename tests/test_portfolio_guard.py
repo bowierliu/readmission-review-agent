@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import sqlite3
+import subprocess
 import threading
 import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 from portfolio_guard import (
     DEFAULTS,
@@ -18,11 +21,28 @@ from portfolio_guard import (
     OUTPUT_RATE,
     Guard,
     GuardError,
+    _worker,
     initialize,
 )
 
 
 class BudgetTests(unittest.TestCase):
+    def test_auth_rejection_surfaces_safe_remedy_and_retains_reservation(self) -> None:
+        with patch("http.client.HTTPSConnection") as connection, patch(
+            "sys.stdin", io.StringIO('["count","mock",{}]')
+        ), self.assertRaises(SystemExit) as worker_exit:
+            connection.return_value.getresponse.return_value.status = 401
+            _worker()
+        failure = subprocess.CalledProcessError(int(str(worker_exit.exception.code)), ["worker"])
+        guard = Guard(self.path, lambda: "test")
+        with (
+            patch("subprocess.run", side_effect=failure),
+            guard.investigation("owner") as run,
+            self.assertRaisesRegex(GuardError, "OpenAI rejected the portfolio key"),
+        ):
+            run.model("scope", "case")
+        self.assertEqual(self.spend(), 4_800_000)
+
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
